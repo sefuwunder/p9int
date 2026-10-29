@@ -4,6 +4,9 @@ One script that brings the Plan 9 desk up: it scans each desk
 service, and starts the ones that are down. Idempotent — run it
 whenever, it never starts a duplicate and never kills a stranger.
 
+Workflows you can run on the mounted trees today (no tag verbs
+needed): see [TUTORIAL.md](TUTORIAL.md).
+
 ## Usage
 
 ```
