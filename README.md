@@ -51,8 +51,10 @@ creates its data directory.
 
 Service directories resolve in order: `$CADENCE_DIR` (and
 `$RELAY_DIR`, `$OUTPOST_DIR`, `$TRANSLATOR_DIR`), a subdirectory
-of this script's directory, `$HOME/<name>`. A service with no
-directory is reported `missing` and skipped.
+of this script's directory, a sibling of this script's directory
+(the filetree/src layout, where the desk checkout sits beside the
+app checkouts), `$HOME/<name>`. A service with no directory is
+reported `missing` and skipped.
 
 Logs go to `$DESK_LOG_DIR`, default `logs/` beside the script
 (gitignored here). The translator has no port to scan, so it is

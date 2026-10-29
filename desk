@@ -32,8 +32,9 @@
 # stranger process and never starts a second server onto its port.
 #
 # Service directories, in order: $CADENCE_DIR (and friends), a
-# subdirectory of this script's directory, $HOME/<name>. A service
-# with no directory is reported missing and skipped.
+# subdirectory of this script's directory, a sibling of this
+# script's directory, $HOME/<name>. A service with no directory is
+# reported missing and skipped.
 # Logs go to $DESK_LOG_DIR, default <script dir>/logs. The
 # translator's pidfile lives there too; a translator started by hand
 # (not through desk) is invisible to it, by design — start the desk
@@ -58,11 +59,16 @@ if ! command -v nohup >/dev/null 2>&1; then
 fi
 
 # dirfor NAME ENVVAL — resolve a service directory, or print nothing.
+# Order: $NAME_DIR, a subdirectory of this script's directory, a
+# sibling of this script's directory (the filetree/src layout, where
+# the desk checkout sits beside the app checkouts), $HOME/<name>.
 dirfor() {
 	if [ -n "$2" ]; then
 		echo "$2"
 	elif [ -d "$D/$1" ]; then
 		echo "$D/$1"
+	elif [ -d "$D/../$1" ]; then
+		echo "$D/../$1"
 	elif [ -d "$HOME/$1" ]; then
 		echo "$HOME/$1"
 	fi
