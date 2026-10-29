@@ -1,0 +1,195 @@
+#!/bin/sh
+# desk — start the Plan 9 desk services that are not already answering.
+#
+# Usage: desk [status]
+#   desk         probe each service; start the ones that are down
+#   desk status  probe only, start nothing
+#
+# Services (the 9P must-haves; the HTTP UIs are separate and not needed
+# for the desk):
+#   cadence     9P 9040  bun src/ninep-server.ts
+#   relay       9P 9006  bun src/ninep-server.ts (read-only tree)
+#   outpost     9P 9029  bun src/ninep-server.ts (read-only tree)
+#   translator  no port bun src/translator.ts (pidfile-detected)
+#
+# A 9P service counts as up only when it answers a Tversion handshake,
+# not merely when something listens on its port. A port that answers
+# TCP but not 9P is reported busy and left alone — desk never kills a
+# stranger process and never starts a second server onto its port.
+#
+# Service directories, in order: $CADENCE_DIR (and friends), a
+# subdirectory of this script's directory, $HOME/<name>. A service
+# with no directory is reported missing and skipped.
+# Logs go to $DESK_LOG_DIR, default <script dir>/logs. The
+# translator's pidfile lives there too; a translator started by hand
+# (not through desk) is invisible to it, by design — start the desk
+# through desk.
+#
+# Exit status: 0 when every found service ends up, 1 otherwise.
+
+D=$(dirname "$0")
+LOGDIR=${DESK_LOG_DIR:-$D/logs}
+mkdir -p "$LOGDIR" || exit 1
+
+if ! command -v bun >/dev/null 2>&1; then
+	echo "desk: bun not found on PATH" >&2
+	exit 1
+fi
+if ! command -v nohup >/dev/null 2>&1; then
+	echo "desk: nohup not found" >&2
+	exit 1
+fi
+
+# dirfor NAME ENVVAL — resolve a service directory, or print nothing.
+dirfor() {
+	if [ -n "$2" ]; then
+		echo "$2"
+	elif [ -d "$D/$1" ]; then
+		echo "$D/$1"
+	elif [ -d "$HOME/$1" ]; then
+		echo "$HOME/$1"
+	fi
+}
+
+# probe PORT — exit 0 iff a 9P server answers a Tversion handshake.
+probe() {
+	PORT=$1 bun -e '
+const net = require("node:net");
+const port = parseInt(process.env.PORT, 10);
+const s = net.connect(port, "127.0.0.1");
+let done = false;
+const ok = (v) => { if (!done) { done = true; s.destroy(); process.exit(v ? 0 : 1); } };
+s.setTimeout(2000, () => ok(false));
+s.on("error", () => ok(false));
+s.on("connect", () => {
+	const b = Buffer.alloc(19);
+	b.writeUInt32LE(19, 0);
+	b.writeUInt8(100, 4);
+	b.writeUInt16LE(0xffff, 5);
+	b.writeUInt32LE(8192, 7);
+	b.writeUInt16LE(6, 11);
+	b.write("9P2000", 13);
+	s.write(b);
+});
+let buf = Buffer.alloc(0);
+s.on("data", (d) => {
+	buf = Buffer.concat([buf, d]);
+	if (buf.length >= 7)
+		ok(buf.readUInt8(4) === 101);
+});
+setTimeout(() => ok(false), 3000);
+' 2>/dev/null
+}
+
+# listens PORT — exit 0 iff something accepts TCP on the port.
+listens() {
+	PORT=$1 bun -e '
+const net = require("node:net");
+const s = net.connect(parseInt(process.env.PORT, 10), "127.0.0.1");
+s.setTimeout(2000, () => { s.destroy(); process.exit(1); });
+s.on("error", () => process.exit(1));
+s.on("connect", () => { s.destroy(); process.exit(0); });
+setTimeout(() => process.exit(1), 3000);
+' 2>/dev/null
+}
+
+# launch DIR LOG CMD... — start a service detached, logging to LOG.
+launch() {
+	dir=$1; log=$2; shift 2
+	old=$PWD
+	cd "$dir" || return 1
+	if command -v setsid >/dev/null 2>&1; then
+		setsid nohup "$@" >>"$log" 2>&1 </dev/null &
+	else
+		nohup "$@" >>"$log" 2>&1 </dev/null &
+	fi
+	pid=$!
+	cd "$old" || exit 1
+	echo "$pid"
+}
+
+fail=0
+
+# ninep NAME PORT DIR — probe, optionally start, report one line.
+ninep() {
+	name=$1; port=$2; dir=$3
+	if [ -z "$dir" ]; then
+		echo "$name $port missing (no dir)"
+		fail=1
+		return
+	fi
+	if probe "$port"; then
+		echo "$name $port up"
+		return
+	fi
+	if [ "$MODE" = "status" ]; then
+		if listens "$port"; then
+			echo "$name $port busy (not 9P)"
+		else
+			echo "$name $port down"
+		fi
+		fail=1
+		return
+	fi
+	if listens "$port"; then
+		echo "$name $port busy (not 9P, left alone)"
+		fail=1
+		return
+	fi
+	launch "$dir" "$LOGDIR/$name.log" env NINEP_PORT="$port" bun src/ninep-server.ts >/dev/null
+	sleep 1
+	if probe "$port"; then
+		echo "$name $port started"
+	else
+		echo "$name $port failed (see $LOGDIR/$name.log)"
+		fail=1
+	fi
+}
+
+# translator DIR — pidfile-detected; no port to scan.
+translator() {
+	dir=$1
+	pidfile=$LOGDIR/translator.pid
+	if [ -z "$dir" ]; then
+		echo "translator missing (no dir)"
+		fail=1
+		return
+	fi
+	if [ -f "$pidfile" ]; then
+		pid=$(cat "$pidfile" 2>/dev/null)
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+			echo "translator pid $pid running"
+			return
+		fi
+		rm -f "$pidfile"
+	fi
+	if [ "$MODE" = "status" ]; then
+		echo "translator down"
+		fail=1
+		return
+	fi
+	pid=$(launch "$dir" "$LOGDIR/translator.log" bun src/translator.ts)
+	echo "$pid" >"$pidfile"
+	sleep 1
+	if kill -0 "$pid" 2>/dev/null; then
+		echo "translator pid $pid started"
+	else
+		echo "translator failed (see $LOGDIR/translator.log)"
+		fail=1
+	fi
+}
+
+MODE=run
+if [ "${1:-}" = "status" ]; then
+	MODE=status
+elif [ -n "${1:-}" ]; then
+	echo "usage: desk [status]" >&2
+	exit 1
+fi
+
+ninep cadence 9040 "$(dirfor cadence "$CADENCE_DIR")"
+ninep relay 9006 "$(dirfor relay "$RELAY_DIR")"
+ninep outpost 9029 "$(dirfor outpost "$OUTPOST_DIR")"
+translator "$(dirfor translator "$TRANSLATOR_DIR")"
+
+exit $fail
