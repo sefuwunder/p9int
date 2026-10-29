@@ -27,7 +27,7 @@
 #
 # Exit status: 0 when every found service ends up, 1 otherwise.
 
-D=$(dirname "$0")
+D=$(cd "$(dirname "$0")" && pwd)
 LOGDIR=${DESK_LOG_DIR:-$D/logs}
 mkdir -p "$LOGDIR" || exit 1
 
