@@ -1,9 +1,23 @@
 #!/bin/sh
 # desk — start the Plan 9 desk services that are not already answering.
 #
-# Usage: desk [status]
-#   desk         probe each service; start the ones that are down
+# Usage: desk [status|acme|unmount]
+#   desk         probe each service; start the ones that are not up
 #   desk status  probe only, start nothing
+#   desk acme    start the services, mount the 9P trees, launch acme;
+#                closing acme unmounts (mounts live for the session)
+#   desk unmount unmount the trees (clears mounts a crashed session
+#                left behind); prints nothing for mounts already gone
+#
+# Mounts (desk acme only; 9pfuse from plan9port, so /dev/fuse and an
+# X display are required):
+#   $MOUNT_ROOT/cadence       cadence 9P tree (templates, runs, today, staging)
+#   $MOUNT_ROOT/comms/relay   relay 9P tree (contacts, threads)
+#   $MOUNT_ROOT/comms/outpost outpost 9P tree (contacts, threads, inbox)
+# MOUNT_ROOT defaults to /n (the guide's paths). If /n cannot be
+# created, desk prints the one-time sudo mkdir command; setting
+# MOUNT_ROOT=$HOME/n works with no privileges. PLAN9 defaults to
+# $HOME/plan9port; NINEPFUSE_BIN and ACME_BIN override the binaries.
 #
 # Services (the 9P must-haves; the HTTP UIs are separate and not needed
 # for the desk):
@@ -26,9 +40,12 @@
 # through desk.
 #
 # Exit status: 0 when every found service ends up, 1 otherwise.
+# desk acme exits with acme's exit status; desk unmount exits 1
+# only if a mounted tree could not be unmounted.
 
 D=$(cd "$(dirname "$0")" && pwd)
 LOGDIR=${DESK_LOG_DIR:-$D/logs}
+MOUNT_ROOT=${MOUNT_ROOT:-/n}
 mkdir -p "$LOGDIR" || exit 1
 
 if ! command -v bun >/dev/null 2>&1; then
@@ -109,6 +126,7 @@ launch() {
 }
 
 fail=0
+ninep_fail=0
 
 # ninep NAME PORT DIR — probe, optionally start, report one line.
 ninep() {
@@ -116,6 +134,7 @@ ninep() {
 	if [ -z "$dir" ]; then
 		echo "$name $port missing (no dir)"
 		fail=1
+		ninep_fail=1
 		return
 	fi
 	if probe "$port"; then
@@ -129,11 +148,13 @@ ninep() {
 			echo "$name $port down"
 		fi
 		fail=1
+		ninep_fail=1
 		return
 	fi
 	if listens "$port"; then
 		echo "$name $port busy (not 9P, left alone)"
 		fail=1
+		ninep_fail=1
 		return
 	fi
 	launch "$dir" "$LOGDIR/$name.log" env NINEP_PORT="$port" bun src/ninep-server.ts >/dev/null
@@ -143,6 +164,7 @@ ninep() {
 	else
 		echo "$name $port failed (see $LOGDIR/$name.log)"
 		fail=1
+		ninep_fail=1
 	fi
 }
 
@@ -179,17 +201,161 @@ translator() {
 	fi
 }
 
+# is_mounted MP — exit 0 iff MP is a mountpoint (Linux /proc/mounts).
+is_mounted() {
+	awk -v mp="$1" '$2 == mp { f = 1 } END { exit !f }' /proc/mounts 2>/dev/null
+}
+
+# unmount_one MP — unmount if mounted; prints only when it acts.
+unmount_one() {
+	mp=$1
+	is_mounted "$mp" || return 0
+	for tool in fusermount fusermount3; do
+		if command -v $tool >/dev/null 2>&1; then
+			$tool -u "$mp" 2>/dev/null
+			if ! is_mounted "$mp"; then
+				echo "unmounted $mp"
+				return 0
+			fi
+		fi
+	done
+	if command -v umount >/dev/null 2>&1; then
+		umount "$mp" 2>/dev/null
+		if ! is_mounted "$mp"; then
+			echo "unmounted $mp"
+			return 0
+		fi
+	fi
+	echo "desk: could not unmount $mp" >&2
+	return 1
+}
+
+# unmount_all — unmount every desk mountpoint; exit 1 if one sticks.
+unmount_all() {
+	rc=0
+	unmount_one "$MOUNT_ROOT/comms/outpost" || rc=1
+	unmount_one "$MOUNT_ROOT/comms/relay" || rc=1
+	unmount_one "$MOUNT_ROOT/cadence" || rc=1
+	return $rc
+}
+
+# mount_one NAME PORT MP VERIFY — mount one 9P server with 9pfuse.
+# VERIFY is a path that must exist once the mount is up. A mountpoint
+# that is already mounted is reused only if its verify path reads;
+# a non-empty unmounted directory is refused, never hidden.
+mount_one() {
+	name=$1; port=$2; mp=$3; verify=$4
+	if is_mounted "$mp"; then
+		if [ -e "$verify" ]; then
+			echo "$name $mp already mounted"
+			return 0
+		fi
+		echo "desk acme: $mp is mounted but $verify is unreadable" >&2
+		return 1
+	fi
+	mkdir -p "$mp" || { echo "desk acme: cannot create $mp" >&2; return 1; }
+	if [ -n "$(ls -A "$mp" 2>/dev/null)" ]; then
+		echo "desk acme: $mp is not empty, refusing to hide its files" >&2
+		return 1
+	fi
+	"$NINEPFUSE_BIN" "tcp!127.0.0.1!$port" "$mp" >>"$LOGDIR/9pfuse-$name.log" 2>&1 &
+	pid=$!
+	i=0
+	while [ $i -lt 50 ]; do
+		if is_mounted "$mp" && [ -e "$verify" ]; then
+			echo "$name $mp mounted"
+			return 0
+		fi
+		sleep 0.1
+		i=$((i + 1))
+	done
+	kill $pid 2>/dev/null
+	echo "desk acme: $name failed to mount (see $LOGDIR/9pfuse-$name.log)" >&2
+	return 1
+}
+
+# acme_precheck — fast checks before starting anything: plan9port
+# binaries, FUSE, an unmount tool, a display, a creatable mount root.
+acme_precheck() {
+	PLAN9=${PLAN9:-$HOME/plan9port}
+	NINEPFUSE_BIN=${NINEPFUSE_BIN:-$PLAN9/bin/9pfuse}
+	ACME_BIN=${ACME_BIN:-$PLAN9/bin/acme}
+	if [ ! -x "$NINEPFUSE_BIN" ]; then
+		echo "desk acme: 9pfuse not found at $NINEPFUSE_BIN (set PLAN9 to your plan9port checkout, or NINEPFUSE_BIN)" >&2
+		return 1
+	fi
+	if [ ! -x "$ACME_BIN" ]; then
+		echo "desk acme: acme not found at $ACME_BIN (set PLAN9, or ACME_BIN)" >&2
+		return 1
+	fi
+	if [ ! -e /dev/fuse ]; then
+		echo "desk acme: FUSE is not available on this machine (/dev/fuse missing)" >&2
+		echo "  9pfuse cannot mount without it. On Ubuntu: install fuse3 and load the module (sudo modprobe fuse)." >&2
+		echo "  If this kernel has no fuse module, the desk mounts cannot run here." >&2
+		return 1
+	fi
+	if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1 && ! command -v umount >/dev/null 2>&1; then
+		echo "desk acme: no unmount tool (fusermount, fusermount3, umount) — mounts could not be cleaned up" >&2
+		return 1
+	fi
+	if [ -z "${DISPLAY:-}" ]; then
+		echo "desk acme: DISPLAY is unset, acme needs an X display" >&2
+		return 1
+	fi
+	for mp in "$MOUNT_ROOT/cadence" "$MOUNT_ROOT/comms/relay" "$MOUNT_ROOT/comms/outpost"; do
+		if ! mkdir -p "$mp" 2>/dev/null; then
+			echo "desk acme: cannot create $mp" >&2
+			echo "  run once: sudo mkdir -p $MOUNT_ROOT/cadence $MOUNT_ROOT/comms/relay $MOUNT_ROOT/comms/outpost" >&2
+			return 1
+		fi
+	done
+	return 0
+}
+
+# acme_launch — mount all three trees, then run acme in the
+# foreground with today's file open; closing acme unmounts via trap.
+# Translator state does not gate this: reading the desk works
+# without it.
+acme_launch() {
+	mount_one cadence 9040 "$MOUNT_ROOT/cadence" "$MOUNT_ROOT/cadence/today" || { unmount_all; return 1; }
+	mount_one relay 9006 "$MOUNT_ROOT/comms/relay" "$MOUNT_ROOT/comms/relay/contacts" || { unmount_all; return 1; }
+	mount_one outpost 9029 "$MOUNT_ROOT/comms/outpost" "$MOUNT_ROOT/comms/outpost/contacts" || { unmount_all; return 1; }
+	trap 'unmount_all' EXIT
+	trap 'unmount_all; exit 130' INT
+	trap 'unmount_all; exit 143' TERM
+	echo "desk acme: mounts up, launching acme (close acme to unmount)"
+	"$ACME_BIN" "$MOUNT_ROOT/cadence/today"
+	rc=$?
+	echo "desk acme: acme exited ($rc)"
+	return $rc
+}
+
 MODE=run
-if [ "${1:-}" = "status" ]; then
-	MODE=status
-elif [ -n "${1:-}" ]; then
-	echo "usage: desk [status]" >&2
-	exit 1
+VERB=${1:-}
+case "$VERB" in
+	"") ;;
+	status) MODE=status ;;
+	acme) ;;
+	unmount) unmount_all; exit $? ;;
+	*) echo "usage: desk [status|acme|unmount]" >&2; exit 1 ;;
+esac
+
+if [ "$VERB" = "acme" ]; then
+	acme_precheck || exit 1
 fi
 
 ninep cadence 9040 "$(dirfor cadence "$CADENCE_DIR")"
 ninep relay 9006 "$(dirfor relay "$RELAY_DIR")"
 ninep outpost 9029 "$(dirfor outpost "$OUTPOST_DIR")"
 translator "$(dirfor translator "$TRANSLATOR_DIR")"
+
+if [ "$VERB" = "acme" ]; then
+	if [ "$ninep_fail" -ne 0 ]; then
+		echo "desk acme: a 9P service is not up, not mounting" >&2
+		exit 1
+	fi
+	acme_launch
+	exit $?
+fi
 
 exit $fail

@@ -9,6 +9,10 @@ whenever, it never starts a duplicate and never kills a stranger.
 ```
 desk          probe each service; start the ones that are down
 desk status   probe only, start nothing
+desk acme     start the services, mount the 9P trees, launch acme;
+              closing acme unmounts (mounts live for the session)
+desk unmount  unmount the trees (clears mounts a crashed session
+              left behind)
 ```
 
 One line per service, exit 0 when everything ends up, 1 otherwise:
@@ -55,3 +59,42 @@ Logs go to `$DESK_LOG_DIR`, default `logs/` beside the script
 detected by a pidfile in the log directory; a translator started
 by hand, not through desk, is invisible to it — start the desk
 through desk.
+
+## desk acme — mounts and launch
+
+`desk acme` runs the normal startup first, then mounts the three
+9P trees with plan9port's `9pfuse` and launches acme with today's
+file open. The translator is started but does not gate the
+session: reading the desk works without it. If any 9P service is
+not up after startup, acme is not launched.
+
+```
+$n/cadence        cadence tree (templates, runs, today, staging)
+$n/comms/relay    relay tree (contacts, threads)
+$n/comms/outpost  outpost tree (contacts, threads, inbox)
+```
+
+`$n` is `$MOUNT_ROOT`, default `/n` (the guide's paths). If `/n`
+cannot be created, desk prints the one-time `sudo mkdir` command;
+`MOUNT_ROOT=$HOME/n` works with no privileges. `PLAN9` defaults
+to `$HOME/plan9port`; `NINEPFUSE_BIN` and `ACME_BIN` override the
+two binaries.
+
+Requirements, checked before anything starts: `9pfuse` and `acme`
+present, `/dev/fuse` present (on Ubuntu: install fuse3 and load
+the module with `sudo modprobe fuse`; a kernel with no fuse
+module cannot run the mounts), an unmount tool (`fusermount`,
+`fusermount3`, or `umount`), and `DISPLAY` set.
+
+Mounts are verified before acme launches: each mountpoint must
+appear mounted and its probe path must read (`today` for cadence,
+`contacts` for relay and outpost). A mountpoint that is already
+mounted is reused only if its probe path reads; a non-empty
+unmounted directory is refused, never hidden. A mount that fails
+unmounts the ones that succeeded, and acme never launches
+half-mounted.
+
+Closing acme unmounts (trap on exit, interrupt, and terminate).
+`desk unmount` clears mounts left by a crashed session; it prints
+nothing for mounts already gone and exits 1 only if a mounted
+tree could not be unmounted.
