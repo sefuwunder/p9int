@@ -78,9 +78,16 @@ $n/comms/outpost  outpost tree (contacts, threads, inbox)
 
 `$n` is `$MOUNT_ROOT`, default `/n` (the guide's paths). If `/n`
 cannot be created, desk prints the one-time `sudo mkdir` command;
-`MOUNT_ROOT=$HOME/n` works with no privileges. `PLAN9` defaults
-to `$HOME/plan9port`; `NINEPFUSE_BIN` and `ACME_BIN` override the
-two binaries.
+`MOUNT_ROOT=$HOME/n` works with no privileges. Mountpoints must be
+writable by the user running desk acme: fusermount refuses a
+mountpoint its user cannot write, and 9pfuse then fails with an
+unhelpful `unexpected EOF`. If the dirs were created with sudo,
+hand them over once: `sudo chown -R $(id -un) $MOUNT_ROOT/cadence
+$MOUNT_ROOT/comms` (the sudo mkdir line desk prints already
+includes this). Desk checks writability in precheck and refuses
+with that exact command instead of failing mid-mount. `PLAN9`
+defaults to `$HOME/plan9port`; `NINEPFUSE_BIN` and `ACME_BIN`
+override the two binaries.
 
 Requirements, checked before anything starts: `9pfuse` and `acme`
 present, `/dev/fuse` present (on Ubuntu: install fuse3 and load

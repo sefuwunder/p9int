@@ -16,7 +16,12 @@
 #   $MOUNT_ROOT/comms/outpost outpost 9P tree (contacts, threads, inbox)
 # MOUNT_ROOT defaults to /n (the guide's paths). If /n cannot be
 # created, desk prints the one-time sudo mkdir command; setting
-# MOUNT_ROOT=$HOME/n works with no privileges. PLAN9 defaults to
+# MOUNT_ROOT=$HOME/n works with no privileges. Mountpoints must be
+# writable by the user running desk acme: fusermount refuses a
+# mountpoint its user cannot write, so root-created dirs fail there
+# (and 9pfuse then dies with "unexpected EOF"). The sudo mkdir line
+# desk prints already includes the chown that hands them over.
+# PLAN9 defaults to
 # $HOME/plan9port; NINEPFUSE_BIN and ACME_BIN override the binaries.
 #
 # Services (the 9P must-haves; the HTTP UIs are separate and not needed
@@ -311,10 +316,26 @@ acme_precheck() {
 	for mp in "$MOUNT_ROOT/cadence" "$MOUNT_ROOT/comms/relay" "$MOUNT_ROOT/comms/outpost"; do
 		if ! mkdir -p "$mp" 2>/dev/null; then
 			echo "desk acme: cannot create $mp" >&2
-			echo "  run once: sudo mkdir -p $MOUNT_ROOT/cadence $MOUNT_ROOT/comms/relay $MOUNT_ROOT/comms/outpost" >&2
+			echo "  run once: sudo mkdir -p $MOUNT_ROOT/cadence $MOUNT_ROOT/comms/relay $MOUNT_ROOT/comms/outpost && sudo chown -R $(id -un) $MOUNT_ROOT/cadence $MOUNT_ROOT/comms" >&2
 			return 1
 		fi
 	done
+	# fusermount requires the mounting user to have write access to
+	# the mountpoint; a root-created /n fails there with "user has
+	# no write access", and 9pfuse then dies with "unexpected EOF".
+	# Catch that here, with the fix, instead of mid-mount.
+	unwritable=""
+	for mp in "$MOUNT_ROOT/cadence" "$MOUNT_ROOT/comms/relay" "$MOUNT_ROOT/comms/outpost"; do
+		if [ ! -w "$mp" ]; then
+			unwritable="$unwritable $mp"
+		fi
+	done
+	if [ -n "$unwritable" ]; then
+		echo "desk acme: mountpoint(s) not writable by you:$unwritable" >&2
+		echo "  fusermount refuses mountpoints the mounting user cannot write (usually root-created dirs)" >&2
+		echo "  run: sudo chown -R $(id -un)$unwritable" >&2
+		return 1
+	fi
 	return 0
 }
 
