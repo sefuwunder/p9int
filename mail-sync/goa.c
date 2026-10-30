@@ -412,7 +412,7 @@ goa_credentials(GoaAccount *a, GoaCreds *out, char **err)
 		s = (args->n >= 1) ? json_as_str(args->items[0]) : NULL;
 		out->token = s ? xstrdup(s) : NULL;
 		json_free(args);
-		if (!out->token) {
+		if (!out->token || !out->token[0]) {
 			*err = xstrdup("GetAccessToken returned no token");
 			return -1;
 		}

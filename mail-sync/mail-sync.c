@@ -120,8 +120,7 @@ sync_folder(GoaAccount *a, GoaCreds *creds, const char *folder,
 	}
 	if (creds->oauth2) {
 		if (imap_oauth2(im, creds->user, creds->token, &err) < 0) {
-			fprintf(stderr,
-			    "mail-sync: XOAUTH2 failed: %s\n", err);
+			fprintf(stderr, "mail-sync: %s\n", err);
 			free(err);
 			imap_free(im);
 			mbox_state_free(&st);
@@ -352,6 +351,16 @@ main(int argc, char **argv)
 		fprintf(stderr, "mail-sync: %s\n", err);
 		goa_free_accounts(accs, naccs);
 		return 1;
+	}
+	if (verbose) {
+		/* Account + token length only: never the token itself. */
+		fprintf(stderr, "account %s (%s) via %s\n",
+		    acc->email ? acc->email : "?",
+		    acc->provider_name ? acc->provider_name : "?",
+		    acc->imap_host ? acc->imap_host : "?");
+		if (creds.oauth2)
+			fprintf(stderr, "  oauth2 token: %zu chars\n",
+			    creds.token ? strlen(creds.token) : 0);
 	}
 	if (nfolders == 0) {
 		rc = sync_folder(acc, &creds, "INBOX", root);

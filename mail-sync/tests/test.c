@@ -183,6 +183,23 @@ test_oauth2_case(int mode, const char *label, int want_ok)
 static void
 test_oauth2(void)
 {
+	/* Empty credentials fail before any I/O: fd -1 proves it,
+	 * since a send attempt would fail differently, not hang. */
+	char *err = NULL;
+	Imap *im = imap_from_fd(-1);
+	CHECK(imap_oauth2(im, "alice@example.com", "", &err) != 0 &&
+	    err != NULL && strstr(err, "empty") != NULL,
+	    "oauth2 empty token fails fast");
+	imap_free(im);
+	free(err);
+	err = NULL;
+	im = imap_from_fd(-1);
+	CHECK(imap_oauth2(im, "", "tok123", &err) != 0 &&
+	    err != NULL && strstr(err, "empty") != NULL,
+	    "oauth2 empty user fails fast");
+	imap_free(im);
+	free(err);
+
 	test_oauth2_case(0, "padded challenge", 1);
 	test_oauth2_case(1, "bare challenge", 1);
 	test_oauth2_case(2, "json error challenge", 0);

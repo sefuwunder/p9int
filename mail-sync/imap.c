@@ -331,10 +331,18 @@ imap_login(Imap *im, const char *user, const char *pass, char **err)
 int
 imap_oauth2(Imap *im, const char *user, const char *token, char **err)
 {
-	char *raw = xstrfmt("user=%s\x01auth=Bearer %s\x01\x01", user, token);
-	char *blob = b64_encode((unsigned char *)raw, strlen(raw));
-	char tag[16], *line;
+	char *raw, *blob, tag[16], *line;
 	int ok = -1;
+
+	/* Fail here, not at Gmail: an empty user or token used to be
+	 * sent as a well-formed blob and came back as a confusing
+	 * "[AUTHENTICATIONFAILED] Invalid credentials". */
+	if (!user || !*user || !token || !*token) {
+		*err = xstrdup("empty user or token for XOAUTH2");
+		return -1;
+	}
+	raw = xstrfmt("user=%s\x01auth=Bearer %s\x01\x01", user, token);
+	blob = b64_encode((unsigned char *)raw, strlen(raw));
 	free(raw);
 	next_tag(im, tag, sizeof tag);
 	{

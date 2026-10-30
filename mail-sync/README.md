@@ -110,6 +110,12 @@ posts the same `upasfs` service name.
   rejected. Fixed: the challenge check accepts "+" plus
   whitespace, and a post-blob JSON error challenge is answered
   with the empty line the exchange requires (the old code waited
-  forever for the tagged reply). A full live IMAP sync still
+  forever for the tagged reply). A third run reached Gmail's own
+  rejection ([AUTHENTICATIONFAILED] Invalid credentials); base64
+  was verified correct against the system encoder, so the token
+  itself is the suspect — verbose mode now prints account + token
+  length (never the token) to separate an empty token, which now
+  fails fast with a plain message, from a non-empty rejected one,
+  which points at the GOA grant's scope. A full live IMAP sync still
   awaits confirmation on a real machine: run `mail-sync -l`
   first, then a sync with `-v`.
