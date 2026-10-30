@@ -98,7 +98,12 @@ posts the same `upasfs` service name.
   password, per the account's SMTP flags).
 - Whether `upas/fs` honors the `Status` headers for display is not
   verified; flag state lives authoritatively in the `.state` file.
-- Live verification against a real GOA account + IMAP server has not
-  run yet (no GNOME session in this environment); the suite covers
-  the mbox layer only. Run `mail-sync -l` first on a real machine,
-  then a sync with `-v`.
+- Live verification against a real GOA account + IMAP server is
+  partial: a first live run surfaced a busctl encoding mismatch
+  ("unexpected GetManagedObjects shape") — the parser assumed the
+  reply dict arrives as an array of `[path, interfaces]` pairs, but
+  busctl can encode it as a JSON object instead. Fixed: the parser
+  now accepts both encodings, with regression tests for each, and
+  its errors name the shape actually found. A full live IMAP sync
+  still awaits confirmation on a real machine: run `mail-sync -l`
+  first, then a sync with `-v`.

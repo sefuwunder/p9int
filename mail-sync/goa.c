@@ -219,6 +219,82 @@ set_str(char **dst, const char *src)
 	*dst = src ? xstrdup(src) : NULL;
 }
 
+static const char *
+json_type_name(JType t)
+{
+	switch (t) {
+	case J_NULL:
+		return "null";
+	case J_BOOL:
+		return "boolean";
+	case J_NUM:
+		return "number";
+	case J_STR:
+		return "string";
+	case J_ARR:
+		return "array";
+	case J_OBJ:
+		return "object";
+	}
+	return "?";
+}
+
+/* One (path, interfaces) entry: append a mail-enabled account, or
+ * skip silently when it is not one. Shared by both dict encodings. */
+static void
+add_account(const char *path, Json *ifaces, GoaAccount **accs, int *n,
+    int *cap)
+{
+	Json *acc, *mail;
+	GoaAccount *a;
+	int enabled;
+
+	if (!path || !ifaces)
+		return;
+	ifaces = json_unwrap(ifaces);
+	if (!ifaces || ifaces->t != J_OBJ)
+		return;
+	acc = json_get(ifaces, "org.gnome.OnlineAccounts.Account");
+	mail = json_get(ifaces, "org.gnome.OnlineAccounts.Mail");
+	if (!acc || !mail)
+		return;
+	/* Newer GOA exposes MailDisabled instead of MailEnabled. */
+	if (json_get(acc, "MailDisabled"))
+		enabled = !prop_bool(acc, "MailDisabled", 0);
+	else
+		enabled = prop_bool(acc, "MailEnabled", 1);
+	if (!enabled)
+		return;
+	if (*n == *cap) {
+		*cap = *cap ? *cap * 2 : 4;
+		*accs = xrealloc(*accs, sizeof(GoaAccount) * (size_t)*cap);
+	}
+	a = &(*accs)[*n];
+	memset(a, 0, sizeof *a);
+	a->path = xstrdup(path);
+	set_str(&a->id, prop_str(acc, "Id"));
+	set_str(&a->provider_type, prop_str(acc, "ProviderType"));
+	set_str(&a->provider_name, prop_str(acc, "ProviderName"));
+	set_str(&a->email, prop_str(mail, "EmailAddress"));
+	if (!a->email || !a->email[0])
+		set_str(&a->email, prop_str(acc, "PresentationIdentity"));
+	set_str(&a->imap_host, prop_str(mail, "ImapHost"));
+	set_str(&a->imap_user, prop_str(mail, "ImapUserName"));
+	set_str(&a->smtp_host, prop_str(mail, "SmtpHost"));
+	set_str(&a->smtp_user, prop_str(mail, "SmtpUserName"));
+	a->imap_ssl = prop_bool(mail, "ImapUseSsl", 0);
+	a->imap_tls = prop_bool(mail, "ImapUseTls", 0);
+	a->smtp_ssl = prop_bool(mail, "SmtpUseSsl", 0);
+	a->smtp_tls = prop_bool(mail, "SmtpUseTls", 0);
+	a->smtp_auth = prop_bool(mail, "SmtpUseAuth", 0);
+	a->smtp_xoauth2 = prop_bool(mail, "SmtpAuthXoauth2", 0);
+	a->oauth2 = json_get(ifaces,
+	    "org.gnome.OnlineAccounts.OAuth2Based") != NULL;
+	a->password_based = json_get(ifaces,
+	    "org.gnome.OnlineAccounts.PasswordBased") != NULL;
+	(*n)++;
+}
+
 int
 goa_accounts_from_json(Json *root, GoaAccount **out, int *nout, char **err)
 {
@@ -228,64 +304,38 @@ goa_accounts_from_json(Json *root, GoaAccount **out, int *nout, char **err)
 
 	data = json_get(root, "data");
 	if (!data || data->t != J_ARR || data->n < 1) {
-		*err = xstrdup("unexpected GetManagedObjects shape");
+		*err = xstrdup("GetManagedObjects: missing or empty data array");
 		return -1;
 	}
 	objs = data->items[0];
-	if (!objs || objs->t != J_ARR) {
-		*err = xstrdup("unexpected GetManagedObjects shape");
+	if (!objs) {
+		*err = xstrdup("GetManagedObjects: first out-arg is null");
 		return -1;
 	}
-	for (i = 0; i < objs->n; i++) {
-		Json *pair = objs->items[i], *ifaces, *acc, *mail;
-		GoaAccount *a;
-		const char *path;
-		int enabled;
-		if (!pair || pair->t != J_ARR || pair->n < 2)
-			continue;
-		path = json_as_str(pair->items[0]);
-		ifaces = pair->items[1];
-		if (!path || !ifaces || ifaces->t != J_OBJ)
-			continue;
-		acc = json_get(ifaces, "org.gnome.OnlineAccounts.Account");
-		mail = json_get(ifaces, "org.gnome.OnlineAccounts.Mail");
-		if (!acc || !mail)
-			continue;
-		/* Newer GOA exposes MailDisabled instead of MailEnabled. */
-		if (json_get(acc, "MailDisabled"))
-			enabled = !prop_bool(acc, "MailDisabled", 0);
-		else
-			enabled = prop_bool(acc, "MailEnabled", 1);
-		if (!enabled)
-			continue;
-		if (n == cap) {
-			cap = cap ? cap * 2 : 4;
-			accs = xrealloc(accs, sizeof(GoaAccount) * (size_t)cap);
+	if (objs->t == J_ARR) {
+		/* Dict as an array of [path, interfaces] pairs. */
+		for (i = 0; i < objs->n; i++) {
+			Json *pair = objs->items[i];
+			const char *path;
+			Json *ifaces;
+			if (!pair || pair->t != J_ARR || pair->n < 2)
+				continue;
+			path = json_as_str(pair->items[0]);
+			ifaces = pair->items[1];
+			add_account(path, ifaces, &accs, &n, &cap);
 		}
-		a = &accs[n];
-		memset(a, 0, sizeof *a);
-		a->path = xstrdup(path);
-		set_str(&a->id, prop_str(acc, "Id"));
-		set_str(&a->provider_type, prop_str(acc, "ProviderType"));
-		set_str(&a->provider_name, prop_str(acc, "ProviderName"));
-		set_str(&a->email, prop_str(mail, "EmailAddress"));
-		if (!a->email || !a->email[0])
-			set_str(&a->email, prop_str(acc, "PresentationIdentity"));
-		set_str(&a->imap_host, prop_str(mail, "ImapHost"));
-		set_str(&a->imap_user, prop_str(mail, "ImapUserName"));
-		set_str(&a->smtp_host, prop_str(mail, "SmtpHost"));
-		set_str(&a->smtp_user, prop_str(mail, "SmtpUserName"));
-		a->imap_ssl = prop_bool(mail, "ImapUseSsl", 0);
-		a->imap_tls = prop_bool(mail, "ImapUseTls", 0);
-		a->smtp_ssl = prop_bool(mail, "SmtpUseSsl", 0);
-		a->smtp_tls = prop_bool(mail, "SmtpUseTls", 0);
-		a->smtp_auth = prop_bool(mail, "SmtpUseAuth", 0);
-		a->smtp_xoauth2 = prop_bool(mail, "SmtpAuthXoauth2", 0);
-		a->oauth2 = json_get(ifaces,
-		    "org.gnome.OnlineAccounts.OAuth2Based") != NULL;
-		a->password_based = json_get(ifaces,
-		    "org.gnome.OnlineAccounts.PasswordBased") != NULL;
-		n++;
+	} else if (objs->t == J_OBJ) {
+		/* Dict as a JSON object mapping path to interfaces.
+		 * Same reply, different busctl encoding. */
+		for (i = 0; i < objs->n; i++)
+			add_account(objs->keys[i], objs->items[i], &accs,
+			    &n, &cap);
+	} else {
+		*err = xstrfmt("GetManagedObjects: first out-arg is %s, "
+		    "expected an array of [path, interfaces] pairs or an "
+		    "object mapping path to interfaces",
+		    json_type_name(objs->t));
+		return -1;
 	}
 	*out = accs;
 	*nout = n;

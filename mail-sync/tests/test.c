@@ -5,6 +5,8 @@
  * the new mbox layer: append format, mboxrd escaping, reflag
  * rewrites, and state save/load. */
 #include "../mbox.h"
+#include "../goa.h"
+#include "../json.h"
 #include "../util.h"
 
 #include <stdio.h>
@@ -260,6 +262,126 @@ main(void)
 		    "missing state file -> fresh state");
 		mbox_state_free(&st);
 		free(nopath);
+	}
+
+	/* GOA: GetManagedObjects dict encodings.
+	 *
+	 * busctl --json=short encodes the reply dict two ways across
+	 * versions: an array of [path, interfaces] pairs, or a JSON
+	 * object mapping path to interfaces. The parser must accept
+	 * both; it previously accepted only the pair form, which is
+	 * what "unexpected GetManagedObjects shape" meant on a live bus.
+	 */
+	{
+		/* One account per case below, shared interface bodies. */
+		const char *acc_a =
+		    "\"org.gnome.OnlineAccounts.Account\":{"
+		    "\"Id\":{\"type\":\"s\",\"data\":\"goa_account_1\"},"
+		    "\"ProviderType\":{\"type\":\"s\",\"data\":\"google\"},"
+		    "\"ProviderName\":{\"type\":\"s\",\"data\":\"Google\"},"
+		    "\"MailEnabled\":{\"type\":\"b\",\"data\":true}},"
+		    "\"org.gnome.OnlineAccounts.Mail\":{"
+		    "\"EmailAddress\":{\"type\":\"s\",\"data\":\"alice@example.com\"},"
+		    "\"ImapHost\":{\"type\":\"s\",\"data\":\"imap.example.com\"},"
+		    "\"ImapUserName\":{\"type\":\"s\",\"data\":\"alice@example.com\"},"
+		    "\"ImapUseSsl\":{\"type\":\"b\",\"data\":true},"
+		    "\"ImapUseTls\":{\"type\":\"b\",\"data\":false}},"
+		    "\"org.gnome.OnlineAccounts.OAuth2Based\":{}";
+		const char *acc_nomail =
+		    "\"org.gnome.OnlineAccounts.Account\":{"
+		    "\"Id\":{\"type\":\"s\",\"data\":\"goa_account_2\"},"
+		    "\"ProviderType\":{\"type\":\"s\",\"data\":\"generic\"},"
+		    "\"ProviderName\":{\"type\":\"s\",\"data\":\"Generic\"}}";
+		const char *acc_disabled =
+		    "\"org.gnome.OnlineAccounts.Account\":{"
+		    "\"Id\":{\"type\":\"s\",\"data\":\"goa_account_3\"},"
+		    "\"ProviderType\":{\"type\":\"s\",\"data\":\"generic\"},"
+		    "\"ProviderName\":{\"type\":\"s\",\"data\":\"Generic\"},"
+		    "\"MailDisabled\":{\"type\":\"b\",\"data\":true}},"
+		    "\"org.gnome.OnlineAccounts.Mail\":{"
+		    "\"EmailAddress\":{\"type\":\"s\",\"data\":\"carol@example.org\"},"
+		    "\"ImapHost\":{\"type\":\"s\",\"data\":\"imap.example.org\"},"
+		    "\"ImapUserName\":{\"type\":\"s\",\"data\":\"carol\"},"
+		    "\"ImapUseSsl\":{\"type\":\"b\",\"data\":true},"
+		    "\"ImapUseTls\":{\"type\":\"b\",\"data\":false}}";
+		char *pair_doc, *obj_doc, *gerr = NULL;
+		Json *root;
+		GoaAccount *accs = NULL;
+		int naccs = 0;
+
+		pair_doc = xstrfmt("{\"type\":\"a{oa{sa{sv}}}\",\"data\":[["
+		    "[\"/org/gnome/OnlineAccounts/Accounts/1\",{%s}],"
+		    "[\"/org/gnome/OnlineAccounts/Accounts/2\",{%s}],"
+		    "[\"/org/gnome/OnlineAccounts/Accounts/3\",{%s}]]]}",
+		    acc_a, acc_nomail, acc_disabled);
+		root = json_parse(pair_doc, &gerr);
+		CHECK(root != NULL, "pair-form doc parses");
+		CHECK(goa_accounts_from_json(root, &accs, &naccs, &gerr) == 0,
+		    "pair-form accounts accepted");
+		CHECK(naccs == 1, "pair-form yields exactly the mail account");
+		if (naccs == 1) {
+			CHECK(strcmp(accs[0].email, "alice@example.com") == 0,
+			    "pair-form email correct");
+			CHECK(strcmp(accs[0].imap_host, "imap.example.com") == 0,
+			    "pair-form imap host correct");
+			CHECK(accs[0].oauth2, "pair-form oauth2 detected");
+			CHECK(accs[0].imap_ssl && !accs[0].imap_tls,
+			    "pair-form ssl/tls flags correct");
+		}
+		if (root)
+			json_free(root);
+		goa_free_accounts(accs, naccs);
+		accs = NULL;
+		naccs = 0;
+		free(pair_doc);
+
+		obj_doc = xstrfmt("{\"type\":\"a{oa{sa{sv}}}\",\"data\":[{"
+		    "\"/org/gnome/OnlineAccounts/Accounts/1\":{%s},"
+		    "\"/org/gnome/OnlineAccounts/Accounts/2\":{%s},"
+		    "\"/org/gnome/OnlineAccounts/Accounts/3\":{%s}}]}",
+		    acc_a, acc_nomail, acc_disabled);
+		root = json_parse(obj_doc, &gerr);
+		CHECK(root != NULL, "object-form doc parses");
+		CHECK(goa_accounts_from_json(root, &accs, &naccs, &gerr) == 0,
+		    "object-form accounts accepted");
+		CHECK(naccs == 1, "object-form yields exactly the mail account");
+		if (naccs == 1)
+			CHECK(strcmp(accs[0].email, "alice@example.com") == 0,
+			    "object-form email correct");
+		if (root)
+			json_free(root);
+		goa_free_accounts(accs, naccs);
+		accs = NULL;
+		naccs = 0;
+		free(obj_doc);
+
+		root = json_parse(
+		    "{\"type\":\"a{oa{sa{sv}}}\",\"data\":[[]]}", &gerr);
+		CHECK(root != NULL &&
+		    goa_accounts_from_json(root, &accs, &naccs, &gerr) == 0 &&
+		    naccs == 0, "empty dict -> zero accounts, no error");
+		if (root)
+			json_free(root);
+		goa_free_accounts(accs, naccs);
+
+		root = json_parse("{\"type\":\"s\"}", &gerr);
+		CHECK(root != NULL &&
+		    goa_accounts_from_json(root, &accs, &naccs, &gerr) != 0 &&
+		    gerr != NULL, "missing data array -> error");
+		if (root)
+			json_free(root);
+		free(gerr);
+		gerr = NULL;
+
+		root = json_parse(
+		    "{\"type\":\"a{oa{sa{sv}}}\",\"data\":[\"oops\"]}", &gerr);
+		CHECK(root != NULL &&
+		    goa_accounts_from_json(root, &accs, &naccs, &gerr) != 0 &&
+		    gerr != NULL && strstr(gerr, "string") != NULL,
+		    "bad first out-arg -> error naming the type found");
+		if (root)
+			json_free(root);
+		free(gerr);
 	}
 
 	free(mbox);
