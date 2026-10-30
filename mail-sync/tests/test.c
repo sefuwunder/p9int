@@ -6,8 +6,12 @@
  * rewrites, and state save/load. */
 #include "../mbox.h"
 #include "../goa.h"
+#include "../imap.h"
 #include "../json.h"
 #include "../util.h"
+
+#include <sys/socket.h>
+#include <sys/wait.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +69,123 @@ static int
 contains(const char *buf, size_t len, const char *needle)
 {
 	return count_occurrences(buf, len, needle) > 0;
+}
+
+/* ---------- XOAUTH2 over a scripted socketpair peer ---------- */
+
+static void
+peer_write_all(int fd, const char *s)
+{
+	size_t len = strlen(s), sent = 0;
+	while (sent < len) {
+		ssize_t n = write(fd, s + sent, len - sent);
+		if (n <= 0)
+			_exit(3);
+		sent += (size_t)n;
+	}
+}
+
+/* Read one CRLF-terminated line, stripped. Returns 0 or -1. */
+static int
+peer_read_line(int fd, char *buf, size_t cap)
+{
+	size_t len = 0;
+	for (;;) {
+		char c;
+		ssize_t n = read(fd, &c, 1);
+		if (n <= 0)
+			return -1;
+		if (c == '\n')
+			break;
+		if (len + 1 < cap)
+			buf[len++] = c;
+	}
+	if (len > 0 && buf[len - 1] == '\r')
+		len--;
+	buf[len] = 0;
+	return 0;
+}
+
+/* mode 0: padded "+ " challenge, then OK.
+ * mode 1: bare "+" challenge, then OK.
+ * mode 2: padded challenge, then a JSON error challenge; the client
+ * must answer it with an empty line before the tagged NO arrives. */
+static void
+oauth2_peer(int fd, int mode)
+{
+	char line[1024], tag[32], out[128];
+	size_t i = 0;
+	if (peer_read_line(fd, line, sizeof line) < 0)
+		_exit(3);
+	while (line[i] && line[i] != ' ' && i < sizeof tag - 1) {
+		tag[i] = line[i];
+		i++;
+	}
+	tag[i] = 0;
+	if (mode == 0 || mode == 2)
+		peer_write_all(fd, "+ \r\n");
+	else
+		peer_write_all(fd, "+\r\n");
+	if (peer_read_line(fd, line, sizeof line) < 0)
+		_exit(3);
+	if (mode == 2) {
+		peer_write_all(fd, "+ eyJzdGF0dXMiOiI0MDAifQ==\r\n");
+		if (peer_read_line(fd, line, sizeof line) < 0)
+			_exit(3);
+		if (line[0] != 0)
+			_exit(2); /* client did not answer the challenge */
+		snprintf(out, sizeof out, "%s NO [AUTHENTICATIONFAILED]\r\n",
+		    tag);
+		peer_write_all(fd, out);
+	} else {
+		snprintf(out, sizeof out, "%s OK authenticated\r\n", tag);
+		peer_write_all(fd, out);
+	}
+	_exit(0);
+}
+
+static void
+test_oauth2_case(int mode, const char *label, int want_ok)
+{
+	int sv[2];
+	pid_t pid;
+	int status;
+	char *err = NULL;
+	Imap *im;
+	int r;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+		CHECK(0, "oauth2 %s socketpair", label);
+		return;
+	}
+	pid = fork();
+	if (pid == 0) {
+		close(sv[0]);
+		oauth2_peer(sv[1], mode);
+		_exit(1);
+	}
+	close(sv[1]);
+	im = imap_from_fd(sv[0]);
+	r = imap_oauth2(im, "alice@example.com", "tok123", &err);
+	if (want_ok)
+		CHECK(r == 0, "oauth2 %s succeeds", label);
+	else
+		CHECK(r != 0 && err != NULL && strstr(err, "XOAUTH2 failed") != NULL,
+		    "oauth2 %s fails cleanly with tagged NO", label);
+	imap_free(im);
+	free(err);
+	while (waitpid(pid, &status, 0) < 0)
+		;
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+	    "oauth2 %s peer exited clean", label);
+}
+
+static void
+test_oauth2(void)
+{
+	test_oauth2_case(0, "padded challenge", 1);
+	test_oauth2_case(1, "bare challenge", 1);
+	test_oauth2_case(2, "json error challenge", 0);
 }
 
 int
@@ -384,8 +505,11 @@ main(void)
 		free(gerr);
 	}
 
+
 	free(mbox);
 	free(state);
+	test_oauth2();
+
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures != 0;
 }

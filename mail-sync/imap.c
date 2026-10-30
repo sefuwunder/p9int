@@ -348,9 +348,15 @@ imap_oauth2(Imap *im, const char *user, const char *token, char **err)
 		free(auth);
 	}
 	line = imap_read_line(im);
-	if (!line || strcmp(line, "+") != 0) {
-		*err = xstrfmt("unexpected XOAUTH2 challenge: %s",
-		    line ? line : "(eof)");
+	if (!line || line[0] != '+' ||
+	    strspn(line + 1, " \t") != strlen(line + 1)) {
+		/* IMAP's continuation is "+" SP [text]; Gmail pads the
+		 * empty initial challenge ("+ "), and the old code
+		 * demanded a bare "+". Accept "+" plus whitespace only;
+		 * anything else is a real surprise, and the length in
+		 * the error tells the next diagnosis which it was. */
+		*err = xstrfmt("unexpected XOAUTH2 challenge (len %zu): %s",
+		    line ? strlen(line) : 0, line ? line : "(eof)");
 		free(line);
 		free(blob);
 		return -1;
@@ -371,6 +377,21 @@ imap_oauth2(Imap *im, const char *user, const char *token, char **err)
 		if (!line) {
 			*err = xstrdup("connection closed during XOAUTH2");
 			return -1;
+		}
+		if (line[0] == '+') {
+			/* Server challenge after the blob: on failure
+			 * Gmail sends the JSON error this way, and the
+			 * exchange only completes when the client answers
+			 * with an empty line. The old code swallowed the
+			 * challenge and waited forever for the tagged
+			 * reply that only follows the empty response. */
+			free(line);
+			if (im_send(im, "\r\n") < 0) {
+				*err = xstrdup(
+				    "failed to answer XOAUTH2 challenge");
+				return -1;
+			}
+			continue;
 		}
 		if (strncmp(line, tag, strlen(tag)) == 0) {
 			char *p = line + strlen(tag) + 1;

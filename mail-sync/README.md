@@ -104,6 +104,12 @@ posts the same `upasfs` service name.
   reply dict arrives as an array of `[path, interfaces]` pairs, but
   busctl can encode it as a JSON object instead. Fixed: the parser
   now accepts both encodings, with regression tests for each, and
-  its errors name the shape actually found. A full live IMAP sync
-  still awaits confirmation on a real machine: run `mail-sync -l`
+  its errors name the shape actually found. A second live run
+  surfaced an XOAUTH2 handshake mismatch: Gmail pads the empty
+  continuation ("+ " not "+"), which the old exact-match check
+  rejected. Fixed: the challenge check accepts "+" plus
+  whitespace, and a post-blob JSON error challenge is answered
+  with the empty line the exchange requires (the old code waited
+  forever for the tagged reply). A full live IMAP sync still
+  awaits confirmation on a real machine: run `mail-sync -l`
   first, then a sync with `-v`.
