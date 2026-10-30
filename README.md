@@ -7,6 +7,10 @@ whenever, it never starts a duplicate and never kills a stranger.
 Workflows you can run on the mounted trees today (no tag verbs
 needed): see [TUTORIAL.md](TUTORIAL.md).
 
+Mail for Plan 9: [mail-sync/](mail-sync/) syncs GOA mail to mbox
+files that `upas/fs` can serve, derived from wily's `wmail-sync`
+(same GOA + IMAP code, mbox instead of maildir).
+
 ## Usage
 
 ```
